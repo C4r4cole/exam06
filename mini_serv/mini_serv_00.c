@@ -8,10 +8,88 @@
 #include <sys/select.h>
 #include <netinet/in.h>
 
+int		count = 0;
+int		ids[65536];
+char	*msgs[65536];
+char	buf_write[64];
+char	buf_read[1001];
+int		max_fd;
+fd_set	active_fds;
+fd_set	read_fds;
+fd_set	write_fds;
+
+int extract_message(char **buf, char **msg)
+{
+	char	*newbuf;
+	int	i;
+
+	*msg = 0;
+	if (*buf == 0)
+		return (0);
+	i = 0;
+	while ((*buf)[i])
+	{
+		if ((*buf)[i] == '\n')
+		{
+			newbuf = calloc(1, sizeof(*newbuf) * (strlen(*buf + i + 1) + 1));
+			if (newbuf == 0)
+				return (-1);
+			strcpy(newbuf, *buf + i + 1);
+			*msg = *buf;
+			(*msg)[i + 1] = 0;
+			*buf = newbuf;
+			return (1);
+		}
+		i++;
+	}
+	return (0);
+}
+
+char *str_join(char *buf, char *add)
+{
+	char	*newbuf;
+	int		len;
+
+	if (buf == 0)
+		len = 0;
+	else
+		len = strlen(buf);
+	newbuf = malloc(sizeof(*newbuf) * (len + strlen(add) + 1));
+	if (newbuf == 0)
+		return (0);
+	newbuf[0] = 0;
+	if (buf != 0)
+		strcat(newbuf, buf);
+	free(buf);
+	strcat(newbuf, add);
+	return (newbuf);
+}
+
 void fatal_error(void)
 {
 	write(2, "Fatal error\n", 12);
 	exit(1);
+}
+
+void notify_other(int author, char *str)
+{
+	for (int i = 0; i <= max_fd; i++)
+	{
+		if (FD_ISSET(i, &write_fds) && i != author)
+			send(i, str, strlen(str), 0);
+	}
+}
+
+void remove_client(int fd)
+{
+	sprintf(buf_write, "server: client %d just left\n", ids[fd]);
+	notify_other(fd, buf_write);
+	
+	free(msgs[fd]);
+	msgs[fd] = NULL;
+	
+	FD_CLR(fd, &active_fds);
+	close(fd);
 }
 
 int main(int argc, char **argv)
@@ -43,10 +121,6 @@ int main(int argc, char **argv)
 	if (listen(sockfd, 10) != 0)
 		fatal_error();
 
-	fd_set	active_fds;
-	fd_set	read_fds;
-	fd_set	write_fds;
-	int		max_fd;
 
 	FD_ZERO(&active_fds);
 
@@ -73,6 +147,39 @@ int main(int argc, char **argv)
 						FD_SET(client_fd, &active_fds);
 						if (client_fd > max_fd)
 							max_fd = client_fd;
+						ids[client_fd] = count++;
+						msgs[client_fd] = NULL;
+						sprintf(buf_write, "server: client %d just arrived\n", ids[client_fd]);
+						notify_other(client_fd, buf_write);
+					}
+				}
+				else
+				{
+					int bytes = recv(i, buf_read, 1000, 0);
+					if (bytes > 0)
+					{
+						buf_read[bytes] = '\0';
+						char *new_msg = str_join(msgs[i], buf_read);
+						if (new_msg == NULL)
+							fatal_error();
+						msgs[i] = new_msg;
+						
+						int result;
+						char *msg;
+						while ((result = extract_message(&msgs[i], &msg)) != 0)
+						{
+							if (result == -1)
+								fatal_error();
+							sprintf(buf_write, "client %d: ", ids[i]);
+							notify_other(i, buf_write);
+							notify_other(i, msg);
+							free(msg);
+						}
+					}
+					else
+					{
+						remove_client(i);
+						break;
 					}
 				}
 			}
